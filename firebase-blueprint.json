@@ -1,0 +1,98 @@
+/**
+ * Defines the structure of the FirebaseBlueprint configuration.
+ */
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Represents a user in the Dream Ledge platform",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "bio": { "type": "string" },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "wins": { "type": "number" },
+            "losses": { "type": "number" },
+            "ranking": { "type": "number" }
+          }
+        }
+      },
+      "required": ["uid", "username"]
+    },
+    "Battle": {
+      "title": "Battle",
+      "description": "Represents a live music battle",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "type": "string", "enum": ["waiting", "selection", "active", "voting", "finished"] },
+        "artistA": { "type": "string" },
+        "artistB": { "type": "string" },
+        "judge1": { "type": "string" },
+        "judge2": { "type": "string" },
+        "phase": { "type": "string" },
+        "phaseStartTime": { "type": "number" },
+        "tracks": { "type": "object" },
+        "votes": { "type": "object" },
+        "winner": { "type": "string" },
+        "currentPlayingArtist": { "type": "string" },
+        "isCustom": { "type": "boolean" },
+        "roomCode": { "type": "string" }
+      }
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A direct message between users",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "number" }
+      }
+    },
+    "Room": {
+      "title": "Room",
+      "description": "A public live chat room",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "subject": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "lastMessage": { "type": "string" },
+        "lastTimestamp": { "type": "number" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/battles/{battleId}": {
+      "schema": "Battle",
+      "description": "Active and past battles"
+    },
+    "/queues/{role}/members/{userId}": {
+      "schema": "User",
+      "description": "Matchmaking queues"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Direct messages"
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Public chat rooms"
+    },
+    "/rooms/{roomId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Messages in public chat rooms"
+    }
+  }
+}

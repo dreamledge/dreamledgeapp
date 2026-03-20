@@ -1,0 +1,5 @@
+{
+  "name": "Dreamledge",
+  "description": "The ultimate live music battle arena. Compete, judge, and rise to the top.",
+  "requestFramePermissions": ["camera", "microphone"]
+}
