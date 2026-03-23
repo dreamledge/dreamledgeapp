@@ -4,7 +4,7 @@ import { motion } from 'motion/react';
 import { Edit2, Trophy, Sword, Users, Calendar, Camera, Loader2, Check } from 'lucide-react';
 import { updateProfile } from 'firebase/auth';
 import { db, storage, auth } from '../firebase';
-import { doc, getDoc, updateDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, onSnapshot, query, collection, where, getDocs } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { useAuth, UserProfile } from '../hooks/useAuth';
 import { cn } from '../lib/utils';
@@ -19,6 +19,8 @@ export default function Profile() {
   const [username, setUsername] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
 
   const isOwnProfile = myProfile?.uid === uid;
 
@@ -40,11 +42,45 @@ export default function Profile() {
 
   const handleUpdateProfile = async () => {
     if (!uid) return;
-    await updateDoc(doc(db, 'users', uid), { 
-      bio,
-      username: username.trim() || profile?.username
-    });
-    setIsEditing(false);
+    setError(null);
+    setSuccess(false);
+
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername) {
+      setError("Username cannot be empty");
+      return;
+    }
+
+    if (trimmedUsername.length < 3) {
+      setError("Username must be at least 3 characters long");
+      return;
+    }
+
+    if (trimmedUsername !== profile?.username) {
+      try {
+        const q = query(collection(db, 'users'), where('username', '==', trimmedUsername));
+        const querySnapshot = await getDocs(q);
+        if (!querySnapshot.empty) {
+          setError("This username is already taken. Please choose a different one.");
+          return;
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'users');
+        return;
+      }
+    }
+
+    try {
+      await updateDoc(doc(db, 'users', uid), { 
+        bio,
+        username: trimmedUsername
+      });
+      setIsEditing(false);
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `users/${uid}`);
+    }
   };
 
   const handleUploadPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -156,13 +192,34 @@ export default function Profile() {
               )}
               {isOwnProfile && (
                 <button 
-                  onClick={() => setIsEditing(!isEditing)}
+                  onClick={() => {
+                    setIsEditing(!isEditing);
+                    setError(null);
+                  }}
                   className="p-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all group/edit"
                 >
                   <Edit2 className="w-5 h-5 text-zinc-500 group-hover:text-white transition-colors" />
                 </button>
               )}
             </div>
+            {error && (
+              <motion.p 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="text-red-500 text-[10px] font-black uppercase tracking-widest bg-red-500/10 px-4 py-2 rounded-xl border border-red-500/20"
+              >
+                {error}
+              </motion.p>
+            )}
+            {success && (
+              <motion.p 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="text-emerald-500 text-[10px] font-black uppercase tracking-widest bg-emerald-500/10 px-4 py-2 rounded-xl border border-emerald-500/20"
+              >
+                Profile Updated Successfully
+              </motion.p>
+            )}
             <div className="flex items-center justify-center md:justify-start gap-3">
               <div className="px-4 py-1.5 bg-red-600 rounded-full text-[10px] font-black uppercase tracking-[0.3em] text-white shadow-[0_0_20px_rgba(220,38,38,0.3)]">
                 Rank #{profile.stats.ranking}

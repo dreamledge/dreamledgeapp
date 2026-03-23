@@ -60,6 +60,7 @@ service cloud.firestore {
       match /signaling/{signalId} {
         allow read: if isAuthenticated() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
         allow create: if isAuthenticated() && request.resource.data.from == request.auth.uid;
+        allow delete: if isAuthenticated() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
       }
     }
 

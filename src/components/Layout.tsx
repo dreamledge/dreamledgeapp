@@ -65,18 +65,18 @@ export default function Layout() {
 
       {/* Navigation Bar */}
       <nav className="bg-zinc-950/50 backdrop-blur-md border-b border-white/5 px-6 overflow-x-auto no-scrollbar sticky top-[73px] z-40">
-        <div className="max-w-7xl mx-auto flex items-center justify-center md:justify-start gap-10">
+        <div className="max-w-7xl mx-auto flex items-center justify-between md:justify-start gap-2 sm:gap-10">
           {navItems.map((item) => (
             <Link
               key={item.path}
               to={item.path}
               className={cn(
-                "py-5 px-2 flex items-center gap-2.5 text-[11px] font-black uppercase tracking-[0.2em] transition-all relative group",
+                "py-2 px-2 flex flex-col sm:flex-row items-center gap-1 sm:gap-2.5 transition-all relative group flex-1 sm:flex-none",
                 location.pathname === item.path ? "text-red-600" : "text-zinc-500 hover:text-white"
               )}
             >
-              <item.icon className={cn("w-4 h-4 transition-transform group-hover:scale-110", location.pathname === item.path && "text-red-600")} />
-              <span className="hidden sm:inline">{item.label}</span>
+              <item.icon className={cn("w-5 h-5 sm:w-4 sm:h-4 transition-transform group-hover:scale-110", location.pathname === item.path && "text-red-600")} />
+              <span className="text-[9px] sm:text-[11px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em]">{item.label}</span>
               {location.pathname === item.path && (
                 <motion.div 
                   layoutId="nav-underline"

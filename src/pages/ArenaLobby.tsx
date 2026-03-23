@@ -1,25 +1,41 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { Sword, Mic2, Users, Plus, Loader2, Video, VideoOff, MicOff } from 'lucide-react';
+import { Sword, Mic2, Users, Plus, Loader2, Video, VideoOff, MicOff, X } from 'lucide-react';
 import { db } from '../firebase';
 import { collection, addDoc, onSnapshot, query, where, deleteDoc, doc, setDoc, limit, getDocs } from 'firebase/firestore';
 import { useAuth } from '../hooks/useAuth';
+import { useMediaStream } from '../context/MediaStreamContext';
+import { useLiveKit } from '../context/LiveKitContext';
 import { cn } from '../lib/utils';
 import { handleFirestoreError, OperationType } from '../lib/firestore-errors';
+import { VideoTrack, useTracks, LiveKitRoom } from '@livekit/components-react';
+import { Track as LKTrack, ConnectionState } from 'livekit-client';
 
 export default function ArenaLobby() {
   const { profile } = useAuth();
+  const { isMicOn, isCameraOn, toggleMic, toggleCamera, startMedia, localStream } = useMediaStream();
+  const { connect: connectLiveKit, disconnect: disconnectLiveKit, room: lkRoom, connectionState, connectionError } = useLiveKit();
   const navigate = useNavigate();
   const [isSearching, setIsSearching] = useState<string | null>(null);
   const [roomCode, setRoomCode] = useState('');
-  const [micEnabled, setMicEnabled] = useState(() => localStorage.getItem('micEnabled') !== 'false');
-  const [cameraEnabled, setCameraEnabled] = useState(() => localStorage.getItem('cameraEnabled') === 'true');
-
+  
+  // Connect to a lobby room to keep media alive
   useEffect(() => {
-    localStorage.setItem('micEnabled', String(micEnabled));
-    localStorage.setItem('cameraEnabled', String(cameraEnabled));
-  }, [micEnabled, cameraEnabled]);
+    if (profile) {
+      connectLiveKit('lobby').catch(err => {
+        console.error("Failed to connect to lobby room:", err);
+      });
+    }
+    // We don't disconnect on unmount here because we want it to persist until Arena connects
+  }, [profile, connectLiveKit]);
+
+  // Sync local media state to LiveKit
+  useEffect(() => {
+    if (lkRoom?.localParticipant) {
+      lkRoom.localParticipant.setMicrophoneEnabled(isMicOn);
+    }
+  }, [lkRoom, isMicOn]);
 
   useEffect(() => {
     if (!isSearching || !profile) return;
@@ -54,6 +70,23 @@ export default function ArenaLobby() {
         if (available) {
           targetBattleId = available.id;
           roleToFill = !available.data().judge1 ? 'judge1' : 'judge2';
+        } else {
+          // Create new waiting battle if no available slot for judge
+          const battleRef = await addDoc(collection(db, 'battles'), {
+            status: 'waiting',
+            artistA: null,
+            artistB: null,
+            judge1: profile.uid,
+            judge2: null,
+            phase: 'waiting',
+            phaseStartTime: Date.now(),
+            tracks: {},
+            votes: {},
+            isCustom: false,
+            createdAt: Date.now()
+          });
+          navigate(`/arena/${battleRef.id}`);
+          return;
         }
       }
 
@@ -159,8 +192,54 @@ export default function ArenaLobby() {
     { id: 'spectator', label: 'Random Spectator', icon: Users, color: 'bg-zinc-900', desc: 'Watch the action' },
   ];
 
+  if (connectionState === ConnectionState.Connecting || (connectionState === ConnectionState.Disconnected && !connectionError)) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center gap-6">
+        <div className="relative">
+          <div className="w-24 h-24 border-4 border-red-600/20 border-t-red-600 rounded-full animate-spin" />
+          <Loader2 className="absolute inset-0 m-auto w-8 h-8 text-red-600 animate-pulse" />
+        </div>
+        <div className="text-center space-y-2">
+          <h2 className="text-2xl font-black uppercase tracking-tighter italic text-white">Connecting to Lobby</h2>
+          <p className="text-zinc-500 text-[10px] font-black uppercase tracking-[0.3em] animate-pulse">Preparing your gear...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (connectionError) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center gap-6 p-6 text-center">
+        <div className="w-20 h-20 bg-red-600/10 rounded-full flex items-center justify-center border border-red-600/20 mb-4">
+          <X className="w-10 h-10 text-red-600" />
+        </div>
+        <div className="space-y-2 max-w-md">
+          <h2 className="text-2xl font-black uppercase tracking-tighter italic text-white">Connection Failed</h2>
+          <p className="text-zinc-400 text-sm font-medium leading-relaxed">
+            {connectionError}
+          </p>
+        </div>
+        <div className="flex flex-col gap-3 w-full max-w-xs">
+          <button 
+            onClick={() => connectLiveKit('lobby')}
+            className="w-full py-4 bg-red-600 hover:bg-red-500 text-white font-black uppercase tracking-widest rounded-2xl transition-all shadow-lg"
+          >
+            Retry Connection
+          </button>
+          <button 
+            onClick={() => navigate('/dashboard')}
+            className="w-full py-4 bg-white/5 hover:bg-white/10 text-zinc-400 font-black uppercase tracking-widest rounded-2xl transition-all"
+          >
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="relative min-h-screen pb-20">
+    <LiveKitRoom room={lkRoom || undefined}>
+      <div className="relative min-h-screen pb-20">
       <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-red-900/10 blur-[120px] rounded-full animate-pulse" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-zinc-900/20 blur-[120px] rounded-full" />
@@ -275,29 +354,30 @@ export default function ArenaLobby() {
             </div>
             <div className="flex items-center gap-4 md:gap-6 w-full md:w-auto">
               <button 
-                onClick={() => setMicEnabled(!micEnabled)}
+                onClick={toggleMic}
                 className={cn(
                   "flex-1 md:flex-none flex items-center justify-center gap-3 md:gap-4 px-4 md:px-6 py-3 rounded-xl md:rounded-2xl transition-all border",
-                  micEnabled ? "bg-red-600/10 border-red-600/20 text-red-500" : "bg-zinc-900 border-white/5 text-zinc-500"
+                  isMicOn ? "bg-red-600/10 border-red-600/20 text-red-500" : "bg-zinc-900 border-white/5 text-zinc-500"
                 )}
               >
-                {micEnabled ? <Mic2 className="w-4 h-4 md:w-5 md:h-5" /> : <MicOff className="w-4 h-4 md:w-5 md:h-5" />}
-                <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest">{micEnabled ? 'Mic On' : 'Mic Off'}</span>
+                {isMicOn ? <Mic2 className="w-4 h-4 md:w-5 md:h-5" /> : <MicOff className="w-4 h-4 md:w-5 md:h-5" />}
+                <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest">{isMicOn ? 'Mic On' : 'Mic Off'}</span>
               </button>
               <button 
-                onClick={() => setCameraEnabled(!cameraEnabled)}
+                onClick={toggleCamera}
                 className={cn(
                   "flex-1 md:flex-none flex items-center justify-center gap-3 md:gap-4 px-4 md:px-6 py-3 rounded-xl md:rounded-2xl transition-all border",
-                  cameraEnabled ? "bg-red-600/10 border-red-600/20 text-red-500" : "bg-zinc-900 border-white/5 text-zinc-500"
+                  isCameraOn ? "bg-red-600/10 border-red-600/20 text-red-500" : "bg-zinc-900 border-white/5 text-zinc-500"
                 )}
               >
-                {cameraEnabled ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
-                <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest">{cameraEnabled ? 'Camera On' : 'Camera Off'}</span>
+                {isCameraOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
+                <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest">{isCameraOn ? 'Camera On' : 'Camera Off'}</span>
               </button>
             </div>
           </div>
         </motion.div>
       </div>
     </div>
+    </LiveKitRoom>
   );
 }

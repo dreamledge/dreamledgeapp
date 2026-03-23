@@ -2,11 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, orderBy, onSnapshot, addDoc, serverTimestamp, getDocs, doc, getDoc, limit, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth, UserProfile } from '../hooks/useAuth';
-import { Send, Search, MessageSquare, Loader2, ChevronRight, User, Plus, Users, Hash, X } from 'lucide-react';
+import { Send, Search, MessageSquare, Loader2, ChevronRight, User, Plus, Users, Hash, X, Image as ImageIcon } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { format } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
+import { useLocation, Link } from 'react-router-dom';
 import { handleFirestoreError, OperationType } from '../lib/firestore-errors';
+import GifPicker from '../components/GifPicker';
 
 interface Chat {
   id: string;
@@ -25,12 +27,13 @@ interface Room {
   lastTimestamp?: any;
 }
 
-interface Message {
+  interface Message {
   id: string;
   senderId: string;
   senderName?: string;
   senderPhoto?: string;
   text: string;
+  gifUrl?: string;
   timestamp: any;
 }
 
@@ -47,6 +50,7 @@ export default function Messages() {
   const [searchResults, setSearchResults] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [chatProfiles, setChatProfiles] = useState<{ [uid: string]: UserProfile }>({});
+  const [showGifPicker, setShowGifPicker] = useState(false);
   
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const [showNewDM, setShowNewDM] = useState(false);
@@ -54,7 +58,32 @@ export default function Messages() {
   const [newRoomSubject, setNewRoomSubject] = useState('');
   const [newRoomDesc, setNewRoomDesc] = useState('');
 
+  const [activeUserMenu, setActiveUserMenu] = useState<{ uid: string, x: number, y: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const location = useLocation();
+
+  // Handle 'uid' query param to start a chat
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const targetUid = params.get('uid');
+    
+    if (targetUid && profile && !loading) {
+      const existingChat = chats.find(c => c.participants.includes(targetUid));
+      if (existingChat) {
+        setActiveChat(existingChat);
+        setActiveRoom(null);
+      } else {
+        // Fetch user profile and start chat
+        getDoc(doc(db, 'users', targetUid)).then(snap => {
+          if (snap.exists()) {
+            startChat(snap.data() as UserProfile);
+          }
+        });
+      }
+      // Clear the param from URL without refreshing
+      window.history.replaceState({}, '', location.pathname);
+    }
+  }, [location.search, profile, chats, loading]);
 
   useEffect(() => {
     if (!profile) return;
@@ -248,6 +277,37 @@ export default function Messages() {
       lastMessage: msg,
       lastTimestamp: serverTimestamp()
     });
+  };
+
+  const handleSendGif = async (gifUrl: string) => {
+    if ((!activeChat && !activeRoom) || !profile) return;
+    setShowGifPicker(false);
+
+    const path = activeChat 
+      ? `chats/${activeChat.id}/messages` 
+      : `rooms/${activeRoom!.id}/messages`;
+
+    const parentDoc = activeChat 
+      ? doc(db, 'chats', activeChat.id) 
+      : doc(db, 'rooms', activeRoom!.id);
+
+    try {
+      await addDoc(collection(db, path), {
+        senderId: profile.uid,
+        senderName: profile.username,
+        senderPhoto: profile.photoURL,
+        text: 'Sent a GIF',
+        gifUrl,
+        timestamp: serverTimestamp()
+      });
+
+      await updateDoc(parentDoc, {
+        lastMessage: 'Sent a GIF',
+        lastTimestamp: serverTimestamp()
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
   };
 
   const getOtherParticipant = (chat: Chat) => {
@@ -480,7 +540,19 @@ export default function Messages() {
                     {!isMe && activeRoom && (
                       <div className="flex items-center gap-2 mb-2 px-2">
                         <img src={msg.senderPhoto} className="w-4 h-4 md:w-5 md:h-5 rounded-full border border-white/10" referrerPolicy="no-referrer" />
-                        <span className="text-[8px] md:text-[9px] font-black uppercase tracking-widest text-zinc-500">{msg.senderName}</span>
+                        <button 
+                          onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setActiveUserMenu({ 
+                              uid: msg.senderId, 
+                              x: rect.left, 
+                              y: rect.top 
+                            });
+                          }}
+                          className="text-[8px] md:text-[9px] font-black uppercase tracking-widest text-zinc-500 hover:text-red-600 transition-colors"
+                        >
+                          {msg.senderName}
+                        </button>
                       </div>
                     )}
                     <div className={cn(
@@ -489,7 +561,11 @@ export default function Messages() {
                         ? "bg-red-600 text-white rounded-tr-none shadow-[0_10px_30px_rgba(220,38,38,0.2)]" 
                         : "bg-zinc-900/80 backdrop-blur-md text-zinc-300 rounded-tl-none border border-white/5"
                     )}>
-                      {msg.text}
+                      {msg.gifUrl ? (
+                        <img src={msg.gifUrl} className="rounded-xl w-full max-w-[200px] border border-white/10" referrerPolicy="no-referrer" />
+                      ) : (
+                        msg.text
+                      )}
                     </div>
                     <span className="text-[6px] md:text-[8px] text-zinc-600 font-black uppercase tracking-[0.2em] mt-2 md:mt-3 px-2">
                       {msg.timestamp?.toDate ? format(msg.timestamp.toDate(), 'HH:mm') : ''}
@@ -500,15 +576,80 @@ export default function Messages() {
               <div ref={scrollRef} />
             </div>
 
+            {/* User Context Menu */}
+            <AnimatePresence>
+              {activeUserMenu && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-[60]" 
+                    onClick={() => setActiveUserMenu(null)} 
+                  />
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                    style={{ 
+                      position: 'fixed',
+                      left: Math.min(activeUserMenu.x, window.innerWidth - 160),
+                      top: Math.max(20, activeUserMenu.y - 100),
+                    }}
+                    className="z-[70] w-40 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl overflow-hidden"
+                  >
+                    <Link 
+                      to={`/profile/${activeUserMenu.uid}`}
+                      className="flex items-center gap-3 px-4 py-3 hover:bg-white/5 text-[10px] font-black uppercase tracking-widest text-zinc-400 hover:text-white transition-all"
+                    >
+                      <User className="w-4 h-4 text-red-600" />
+                      View Profile
+                    </Link>
+                    <button 
+                      onClick={() => {
+                        startChat(activeUserMenu.uid);
+                        setActiveUserMenu(null);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/5 text-[10px] font-black uppercase tracking-widest text-zinc-400 hover:text-white transition-all border-t border-white/5"
+                    >
+                      <MessageSquare className="w-4 h-4 text-red-600" />
+                      Send DM
+                    </button>
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
+
             <div className="p-4 md:p-8 bg-black/40 backdrop-blur-xl border-t border-white/5">
               <form onSubmit={sendMessage} className="max-w-4xl mx-auto flex gap-2 md:gap-4 relative group">
-                <input
-                  type="text"
-                  value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
-                  placeholder="Type your message..."
-                  className="relative flex-1 bg-zinc-900/50 border border-white/5 rounded-xl md:rounded-[1.5rem] px-4 md:px-8 py-3 md:py-5 text-xs md:text-sm font-bold focus:ring-1 focus:ring-red-600 focus:bg-zinc-900 transition-all placeholder:text-zinc-600"
-                />
+                <div className="flex-1 relative flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                      placeholder="Type your message..."
+                      className="w-full bg-zinc-900/50 border border-white/5 rounded-xl md:rounded-[1.5rem] px-4 md:px-8 py-3 md:py-5 text-xs md:text-sm font-bold focus:ring-1 focus:ring-red-600 focus:bg-zinc-900 transition-all placeholder:text-zinc-600"
+                    />
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setShowGifPicker(!showGifPicker)}
+                    className={cn(
+                      "p-3 md:p-5 rounded-xl md:rounded-[1.5rem] border transition-all",
+                      showGifPicker ? "bg-red-600 border-red-600 text-white" : "bg-zinc-900/50 border-white/5 text-zinc-500 hover:text-white"
+                    )}
+                  >
+                    <ImageIcon className="w-5 h-5 md:w-6 md:h-6" />
+                  </button>
+                  <AnimatePresence>
+                    {showGifPicker && (
+                      <div className="fixed inset-x-4 bottom-24 md:absolute md:inset-auto md:bottom-full md:right-0 md:mb-4 z-50">
+                        <GifPicker 
+                          onSelect={handleSendGif} 
+                          onClose={() => setShowGifPicker(false)} 
+                        />
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </div>
                 <button 
                   type="submit" 
                   disabled={!newMessage.trim()}
