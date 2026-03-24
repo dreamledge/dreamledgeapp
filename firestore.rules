@@ -45,7 +45,16 @@ service cloud.firestore {
     match /battles/{battleId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidBattle(request.resource.data);
-      allow update: if isAuthenticated();
+      // Only allow updates if the user is a participant or an admin
+      allow update: if isAuthenticated() && (
+        request.auth.uid == resource.data.artistA || 
+        request.auth.uid == resource.data.artistB || 
+        request.auth.uid == resource.data.judge1 || 
+        request.auth.uid == resource.data.judge2 ||
+        request.auth.uid in resource.data.judges ||
+        // Allow anyone to update if it's a vote or a status change that is valid
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['votes', 'status', 'phase', 'phaseStartTime', 'currentPlayingArtist', 'winner', 'tracks'])
+      );
 
       match /messages/{messageId} {
         allow read: if isAuthenticated();

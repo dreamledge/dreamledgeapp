@@ -12,7 +12,7 @@ import {
   useParticipantInfo,
   TrackReference
 } from '@livekit/components-react';
-import { Track as LKTrack, Participant, ConnectionState, RemoteParticipant, LocalParticipant as LKLocalParticipant } from 'livekit-client';
+import { Track as LKTrack, Participant, ConnectionState, RemoteParticipant, LocalParticipant as LKLocalParticipant, Room } from 'livekit-client';
 import { useLiveKit } from '../context/LiveKitContext';
 import { useAuth } from '../hooks/useAuth';
 import { useMediaStream } from '../context/MediaStreamContext';
@@ -410,11 +410,19 @@ export default function Arena() {
   }, [connectionState, isLockedSpectator, battle?.artistA, battle?.artistB, battle?.judges, profile?.uid]);
 
   // Sync Local Media State to LiveKit
+  const lastSyncedRoomRef = useRef<Room | null>(null);
+  
   useEffect(() => {
     let isEffectActive = true;
     desiredMediaStateRef.current = { mic: isMicOn, camera: false }; // Camera always false
     
     if (lkRoom?.localParticipant && connectionState === ConnectionState.Connected) {
+      // If the room object changed, reset the sync flag
+      if (lastSyncedRoomRef.current !== lkRoom) {
+        isSyncingMediaRef.current = false;
+        lastSyncedRoomRef.current = lkRoom;
+      }
+
       const syncMedia = async (retries = 5) => {
         if (!isEffectActive) return;
         if (isSyncingMediaRef.current) {
@@ -427,17 +435,26 @@ export default function Arena() {
         try {
           // Wait for engine to be fully ready. 
           // Initial wait is longer to ensure publisher is ready.
-          const waitTime = retries === 5 ? 5000 : 3000;
+          // Increased wait times to be more conservative.
+          const waitTime = retries === 5 ? 8000 : 5000;
           await new Promise(resolve => setTimeout(resolve, waitTime));
 
           if (!isEffectActive) return;
+          
+          // Re-check room and connection state after wait
           if (!lkRoom || lkRoom.state !== ConnectionState.Connected) {
-            console.warn("[Arena] Skipping media sync: Room not connected");
+            console.warn("[Arena] Skipping media sync: Room not connected or changed");
             isSyncingMediaRef.current = false;
             return;
           }
 
           const localP = lkRoom.localParticipant;
+          if (!localP) {
+            console.warn("[Arena] Skipping media sync: Local participant not available");
+            isSyncingMediaRef.current = false;
+            return;
+          }
+
           const { mic: targetMic } = desiredMediaStateRef.current;
 
           console.log(`[Arena] Syncing media: targetMic=${targetMic} (retries=${retries})`);
@@ -447,28 +464,38 @@ export default function Arena() {
             const currentMicPub = localP.getTrackPublication(LKTrack.Source.Microphone);
             const isCurrentlyMicEnabled = currentMicPub?.isEnabled || false;
             
+            // If we want it ON but it's OFF, or it's not published at all
             if (targetMic !== isCurrentlyMicEnabled || (targetMic && !currentMicPub)) {
               console.log(`[Arena] Setting microphone: ${targetMic}`);
+              
+              // Double check connection state right before publish
+              if (lkRoom.state !== ConnectionState.Connected) {
+                 throw new Error("Room disconnected right before publish");
+              }
+
               // Use a timeout for the publish operation itself to catch stalls
               const publishPromise = localP.setMicrophoneEnabled(targetMic && hasAudioDevice);
               const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error("Publishing timeout")), 15000)
+                setTimeout(() => reject(new Error("Publishing timeout")), 25000)
               );
               
               await Promise.race([publishPromise, timeoutPromise]);
             }
           } catch (err: any) {
-            const isEngineError = err?.message?.includes('engine not connected') || 
-                                 err?.message?.includes('timeout') || 
-                                 err?.message?.includes('rejected');
+            const errMessage = err?.message?.toLowerCase() || "";
+            const isEngineError = errMessage.includes('engine not connected') || 
+                                 errMessage.includes('timeout') || 
+                                 errMessage.includes('rejected') ||
+                                 errMessage.includes('not connected') ||
+                                 errMessage.includes('disconnected');
             
             if (retries > 0 && isEngineError) {
-              console.warn(`[Arena] Mic sync failed (${err.message}), retrying in 3s... (${retries} left)`);
+              console.warn(`[Arena] Mic sync failed (${err.message}), retrying in 6s... (${retries} left)`);
               if (mediaSyncTimeoutRef.current) clearTimeout(mediaSyncTimeoutRef.current);
               mediaSyncTimeoutRef.current = setTimeout(() => {
                 isSyncingMediaRef.current = false; // Reset so retry can run
                 syncMedia(retries - 1);
-              }, 3000);
+              }, 6000);
               return;
             }
             throw err;

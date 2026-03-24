@@ -32,10 +32,12 @@ export default function ArenaLobby() {
 
   // Sync local media state to LiveKit
   useEffect(() => {
-    if (lkRoom?.localParticipant) {
-      lkRoom.localParticipant.setMicrophoneEnabled(isMicOn);
+    if (lkRoom?.localParticipant && lkRoom.state === ConnectionState.Connected) {
+      lkRoom.localParticipant.setMicrophoneEnabled(isMicOn).catch(err => {
+        console.warn("[ArenaLobby] Failed to sync mic state:", err);
+      });
     }
-  }, [lkRoom, isMicOn]);
+  }, [lkRoom, isMicOn, lkRoom?.state]);
 
   useEffect(() => {
     if (!isSearching || !profile) return;
