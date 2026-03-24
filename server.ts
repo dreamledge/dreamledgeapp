@@ -4,6 +4,7 @@ import path from "path";
 import { AccessToken } from "livekit-server-sdk";
 import dotenv from "dotenv";
 
+dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 async function startServer() {
