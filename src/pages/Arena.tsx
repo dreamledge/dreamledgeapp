@@ -44,10 +44,10 @@ import {
   MessageSquare, 
   User, 
   ImageIcon, 
-  Video, 
-  VideoOff, 
   Mic2, 
   MicOff,
+  Wifi,
+  WifiOff,
   Loader2,
   MoreVertical,
   Volume2,
@@ -87,13 +87,9 @@ export default function Arena() {
   const { 
     localStream, 
     isMicOn, 
-    isCameraOn, 
     hasAudioDevice,
-    hasVideoDevice,
     setHasAudioDevice,
-    setHasVideoDevice,
     toggleMic, 
-    toggleCamera, 
     startMedia, 
     mediaError: contextMediaError 
   } = useMediaStream();
@@ -129,10 +125,9 @@ export default function Arena() {
       localParticipant: lkRoom?.localParticipant?.identity,
       remoteParticipants: lkParticipants?.length,
       activeSpeaker: activeSpeaker?.identity,
-      hasAudioDevice,
-      hasVideoDevice
+      hasAudioDevice
     });
-  }, [connectionState, lkRoom, lkParticipants, activeSpeaker, hasAudioDevice, hasVideoDevice]);
+  }, [connectionState, lkRoom, lkParticipants, activeSpeaker, hasAudioDevice]);
   
   const [isLockedSpectator] = useState(() => localStorage.getItem('arenaRole') === 'spectator');
   
@@ -244,22 +239,96 @@ export default function Arena() {
       handleLeave();
     };
     window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('pagehide', onBeforeUnload);
     return () => {
       window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('pagehide', onBeforeUnload);
     };
   }, [handleLeave]);
 
+  const connectionStateRef = useRef(connectionState);
+  useEffect(() => {
+    connectionStateRef.current = connectionState;
+  }, [connectionState]);
+
+  const [connectionTimeout, setConnectionTimeout] = useState(false);
+
   // LiveKit Connection
   useEffect(() => {
+    let isMounted = true;
+    let timeoutId: NodeJS.Timeout;
+
     if (battleId && profile?.uid) {
+      console.log("[Arena] Initiating LiveKit connection for battle:", battleId);
+      
+      // Set a timeout to show a "taking longer than expected" message
+      timeoutId = setTimeout(() => {
+        if (isMounted && connectionStateRef.current === ConnectionState.Connecting) {
+          console.warn("[Arena] LiveKit connection is taking longer than expected...");
+          setConnectionTimeout(true);
+        }
+      }, 15000);
+
       connectLiveKit(battleId).catch(err => {
-        console.error("Failed to connect to LiveKit:", err);
+        if (isMounted) {
+          clearTimeout(timeoutId);
+          // Ignore "Client initiated disconnect" as it's usually a normal cleanup
+          if (err?.message?.includes('Client initiated disconnect')) return;
+          console.error("Failed to connect to LiveKit:", err);
+        }
       });
     }
     return () => {
+      isMounted = false;
+      clearTimeout(timeoutId);
       disconnectLiveKit();
     };
   }, [battleId, profile?.uid, connectLiveKit, disconnectLiveKit]);
+
+  // Stale Role Cleanup Logic
+  // If a role is assigned in Firestore but the user is not in the LiveKit room,
+  // show "Disconnected" for 3 seconds, then clear the role so others can join.
+  useEffect(() => {
+    if (!battle || !battleId || connectionState !== ConnectionState.Connected || !profile?.uid) return;
+
+    // Optimization: Only the "first" participant in the room performs the cleanup
+    // to avoid multiple clients writing to Firestore at once.
+    const allIdentities = [...lkParticipants.map(p => p.identity), profile.uid].sort();
+    const isFirstParticipant = allIdentities[0] === profile.uid;
+    if (!isFirstParticipant) return;
+
+    const roles = ['artistA', 'artistB', 'judge1', 'judge2'] as const;
+    const timers: NodeJS.Timeout[] = [];
+
+    roles.forEach(role => {
+      const assignedUid = battle[role];
+      if (!assignedUid) return;
+
+      // Check if participant is in LiveKit (remote or local)
+      const isPresent = lkParticipants.some(p => p.identity === assignedUid) || (profile?.uid === assignedUid);
+      
+      if (!isPresent) {
+        console.log(`[Arena] Role ${role} (${assignedUid}) is stale. Starting 3s cleanup timer...`);
+        const timer = setTimeout(async () => {
+          try {
+            // Double check if still not present before writing to Firestore
+            // (The effect re-running will clear this timer if they re-join)
+            console.log(`[Arena] Cleaning up stale role ${role} (${assignedUid}) after 3s disconnect`);
+            await updateDoc(doc(db, 'battles', battleId), {
+              [role]: null
+            });
+          } catch (error) {
+            console.error(`[Arena] Failed to cleanup stale role ${role}:`, error);
+          }
+        }, 3000);
+        timers.push(timer);
+      }
+    });
+
+    return () => {
+      timers.forEach(clearTimeout);
+    };
+  }, [battle, lkParticipants, profile?.uid, battleId, connectionState]);
 
   const handleJoinRole = useCallback(async (role: 'artistA' | 'artistB' | 'judge1' | 'judge2') => {
     if (!battleId || !profile || !battle) return;
@@ -322,10 +391,6 @@ export default function Arena() {
 
         if (hasRole) {
           console.log("[Arena] User has role (artist/judge), ensuring media is enabled");
-          if (!isCameraOn) {
-            console.log("[Arena] Auto-enabling camera for role");
-            await toggleCameraLocal();
-          }
           if (!isMicOn) {
             console.log("[Arena] Auto-enabling microphone for role");
             await toggleMicLocal();
@@ -333,10 +398,6 @@ export default function Arena() {
         } else {
           // For spectators, we might still want to auto-enable if they have devices, 
           // but maybe less aggressively.
-          if (!isCameraOn && hasVideoDevice) {
-            console.log("[Arena] Auto-enabling camera for spectator");
-            await toggleCameraLocal();
-          }
           if (!isMicOn && hasAudioDevice) {
             console.log("[Arena] Auto-enabling microphone for spectator");
             await toggleMicLocal();
@@ -349,10 +410,12 @@ export default function Arena() {
 
   // Sync Local Media State to LiveKit
   useEffect(() => {
+    let isEffectActive = true;
     desiredMediaStateRef.current = { mic: isMicOn, camera: false }; // Camera always false
     
     if (lkRoom?.localParticipant && connectionState === ConnectionState.Connected) {
       const syncMedia = async (retries = 5) => {
+        if (!isEffectActive) return;
         if (isSyncingMediaRef.current) {
           console.log("[Arena] Media sync already in progress, skipping...");
           return;
@@ -361,9 +424,12 @@ export default function Arena() {
         isSyncingMediaRef.current = true;
         
         try {
-          // Wait for engine to be fully ready. 2s is safer for slow connections.
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          // Wait for engine to be fully ready. 
+          // Initial wait is longer to ensure publisher is ready.
+          const waitTime = retries === 5 ? 5000 : 3000;
+          await new Promise(resolve => setTimeout(resolve, waitTime));
 
+          if (!isEffectActive) return;
           if (!lkRoom || lkRoom.state !== ConnectionState.Connected) {
             console.warn("[Arena] Skipping media sync: Room not connected");
             isSyncingMediaRef.current = false;
@@ -373,7 +439,7 @@ export default function Arena() {
           const localP = lkRoom.localParticipant;
           const { mic: targetMic } = desiredMediaStateRef.current;
 
-          console.log(`[Arena] Syncing media: targetMic=${targetMic}`);
+          console.log(`[Arena] Syncing media: targetMic=${targetMic} (retries=${retries})`);
 
           // Sync Microphone
           try {
@@ -382,14 +448,26 @@ export default function Arena() {
             
             if (targetMic !== isCurrentlyMicEnabled || (targetMic && !currentMicPub)) {
               console.log(`[Arena] Setting microphone: ${targetMic}`);
-              await localP.setMicrophoneEnabled(targetMic && hasAudioDevice);
+              // Use a timeout for the publish operation itself to catch stalls
+              const publishPromise = localP.setMicrophoneEnabled(targetMic && hasAudioDevice);
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error("Publishing timeout")), 15000)
+              );
+              
+              await Promise.race([publishPromise, timeoutPromise]);
             }
           } catch (err: any) {
-            if (retries > 0 && (err?.message?.includes('engine not connected') || err?.message?.includes('timeout'))) {
-              console.warn(`[Arena] Mic sync failed (engine not connected), retrying... (${retries} left)`);
-              isSyncingMediaRef.current = false;
+            const isEngineError = err?.message?.includes('engine not connected') || 
+                                 err?.message?.includes('timeout') || 
+                                 err?.message?.includes('rejected');
+            
+            if (retries > 0 && isEngineError) {
+              console.warn(`[Arena] Mic sync failed (${err.message}), retrying in 3s... (${retries} left)`);
               if (mediaSyncTimeoutRef.current) clearTimeout(mediaSyncTimeoutRef.current);
-              mediaSyncTimeoutRef.current = setTimeout(() => syncMedia(retries - 1), 2000);
+              mediaSyncTimeoutRef.current = setTimeout(() => {
+                isSyncingMediaRef.current = false; // Reset so retry can run
+                syncMedia(retries - 1);
+              }, 3000);
               return;
             }
             throw err;
@@ -415,7 +493,7 @@ export default function Arena() {
         } finally {
           isSyncingMediaRef.current = false;
           // Check if state changed while we were syncing
-          if (desiredMediaStateRef.current.mic !== isMicOn) {
+          if (isEffectActive && desiredMediaStateRef.current.mic !== isMicOn) {
              console.log("[Arena] Media state changed during sync, re-triggering...");
              syncMedia();
           }
@@ -426,6 +504,7 @@ export default function Arena() {
     }
 
     return () => {
+      isEffectActive = false;
       if (mediaSyncTimeoutRef.current) clearTimeout(mediaSyncTimeoutRef.current);
     };
   }, [lkRoom, isMicOn, connectionState, hasAudioDevice]);
@@ -528,7 +607,6 @@ export default function Arena() {
           username: profile.username,
           photoURL: profile.photoURL,
           joinedAt: Date.now(),
-          isCameraOn,
           isMicOn
         });
 
@@ -584,20 +662,6 @@ export default function Arena() {
     }
   };
 
-  const toggleCameraLocal = async () => {
-    if (!profile || !battleId) return;
-    if (!isCameraOn && !hasVideoDevice) {
-      console.warn("[Arena] Cannot enable camera: No video device found");
-      return;
-    }
-    toggleCamera();
-    try {
-      await setDoc(doc(db, 'battles', battleId, 'participants', profile.uid), { isCameraOn: !isCameraOn }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `battles/${battleId}/participants/${profile.uid}`);
-    }
-  };
-
   // LiveKit handles the connection automatically via the connectLiveKit effect
 
   const toggleRemoteMute = (uid: string) => {
@@ -646,17 +710,6 @@ export default function Arena() {
       unsubParticipants();
     };
   }, [battleId]);
-
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      handleLeave();
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      handleLeave();
-    };
-  }, [handleLeave]);
 
   // Timer Logic
   useEffect(() => {
@@ -836,7 +889,6 @@ export default function Arena() {
 
   return (
     <LiveKitRoom room={lkRoom || undefined}>
-      <RoomAudioRenderer />
       <ArenaContent 
         battle={battle}
         profile={profile}
@@ -863,11 +915,8 @@ export default function Arena() {
         mutedRemoteUsers={mutedRemoteUsers}
         toggleRemoteMute={toggleRemoteMute}
         isMicOn={isMicOn}
-        isCameraOn={isCameraOn}
         toggleMicLocal={toggleMicLocal}
-        toggleCameraLocal={toggleCameraLocal}
         hasAudioDevice={hasAudioDevice}
-        hasVideoDevice={hasVideoDevice}
         contextMediaError={contextMediaError}
         startMedia={startMedia}
         connectionState={connectionState}
@@ -877,6 +926,7 @@ export default function Arena() {
         lkParticipants={lkParticipants}
         getParticipant={getParticipant}
         isLockedSpectator={isLockedSpectator}
+        connectionTimeout={connectionTimeout}
       />
     </LiveKitRoom>
   );
@@ -908,11 +958,8 @@ const ArenaContent = ({
   mutedRemoteUsers, 
   toggleRemoteMute, 
   isMicOn, 
-  isCameraOn, 
   toggleMicLocal, 
-  toggleCameraLocal, 
   hasAudioDevice, 
-  hasVideoDevice, 
   contextMediaError, 
   startMedia, 
   connectionState, 
@@ -921,9 +968,11 @@ const ArenaContent = ({
   lkRoom, 
   lkParticipants, 
   getParticipant,
-  isLockedSpectator
+  isLockedSpectator,
+  connectionTimeout
 }: any) => {
   const navigate = useNavigate();
+  const [audioEnabled, setAudioEnabled] = useState(false);
   const tracks = useTracks([LKTrack.Source.Microphone]);
   const hasAnyTrack = tracks.length > 0;
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
@@ -982,8 +1031,20 @@ const ArenaContent = ({
         <div className="text-center space-y-2">
           <h2 className="text-2xl font-black uppercase tracking-tighter italic text-white">Connecting to Arena</h2>
           <p className="text-zinc-500 text-[10px] font-black uppercase tracking-[0.3em] animate-pulse">
-            {connectionState === ConnectionState.Connected ? "Waiting for media feed..." : "Establishing secure link..."}
+            {connectionState === ConnectionState.Connected 
+              ? "Waiting for media feed..." 
+              : connectionTimeout 
+                ? "Still trying to establish secure link... (Network might be slow)" 
+                : "Establishing secure link..."}
           </p>
+          {connectionTimeout && (
+            <button 
+              onClick={() => window.location.reload()}
+              className="mt-4 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-colors"
+            >
+              Retry Connection
+            </button>
+          )}
         </div>
       </div>
     );
@@ -1033,10 +1094,17 @@ const ArenaContent = ({
     isSpectator
   });
 
-  const [audioEnabled, setAudioEnabled] = useState(false);
-
   return (
     <div className="relative h-full flex flex-col gap-4 md:gap-6 px-4 md:px-6 pb-4 md:pb-6 overflow-hidden">
+      {/* Audio Tracks for all remote participants */}
+      {tracks.map(t => (
+        <AudioTrack 
+          key={t.publication.trackSid} 
+          trackRef={t} 
+          muted={mutedRemoteUsers[t.participant.identity]} 
+        />
+      ))}
+
       {/* Audio Enablement Overlay */}
       <AnimatePresence>
         {!audioEnabled && connectionState === ConnectionState.Connected && (
@@ -1057,9 +1125,16 @@ const ArenaContent = ({
                 </p>
               </div>
               <button 
-                onClick={() => {
+                onClick={async () => {
                   setAudioEnabled(true);
-                  // Resuming AudioContext is handled by browser on this click
+                  if (lkRoom) {
+                    try {
+                      await lkRoom.startAudio();
+                      console.log("[Arena] Audio started successfully via startAudio()");
+                    } catch (err) {
+                      console.error("[Arena] Failed to start audio:", err);
+                    }
+                  }
                 }}
                 className="w-full py-4 bg-red-600 hover:bg-red-500 text-white font-black uppercase tracking-widest rounded-2xl transition-all shadow-lg flex items-center justify-center gap-2"
               >
@@ -1099,7 +1174,7 @@ const ArenaContent = ({
           >
             <div className="glass-panel p-8 rounded-[2.5rem] border border-red-600/20 max-w-md w-full text-center space-y-6 neo-shadow">
               <div className="w-20 h-20 bg-red-600/10 rounded-full flex items-center justify-center mx-auto border border-red-600/20">
-                <VideoOff className="w-10 h-10 text-red-600" />
+                <MicOff className="w-10 h-10 text-red-600" />
               </div>
               <div className="space-y-2">
                 <h3 className="text-2xl font-black uppercase tracking-tighter italic text-white">Media Access Required</h3>
@@ -1274,14 +1349,11 @@ const ArenaContent = ({
               trackUrl={battle.tracks[battle.artistA]}
               isArtistRole={true}
               isCurrentUserArtist={isArtist}
-              isCameraOn={isCameraOn}
               isMicOn={isMicOn}
               toggleMic={toggleMicLocal}
-              toggleCamera={toggleCameraLocal}
               isRemoteMuted={mutedRemoteUsers[battle.artistA]}
               onToggleRemoteMute={() => toggleRemoteMute(battle.artistA)}
               mediaError={isArtistA ? contextMediaError : null}
-              hasVideoDevice={hasVideoDevice}
             />
             <ParticipantBox 
               assignedUid={battle.artistB}
@@ -1298,15 +1370,12 @@ const ArenaContent = ({
               trackUrl={battle.tracks[battle.artistB]}
               isArtistRole={true}
               isCurrentUserArtist={isArtist}
-              isCameraOn={isCameraOn}
               isMicOn={isMicOn}
               toggleMic={toggleMicLocal}
-              toggleCamera={toggleCameraLocal}
               onJoin={!battle.artistB && !isArtist && !isJudge && !isSpectator ? () => handleJoinRole('artistB') : null}
               isRemoteMuted={mutedRemoteUsers[battle.artistB]}
               onToggleRemoteMute={() => toggleRemoteMute(battle.artistB)}
               mediaError={isArtistB ? contextMediaError : null}
-              hasVideoDevice={hasVideoDevice}
             />
             <ParticipantBox 
               assignedUid={battle.judge1}
@@ -1320,15 +1389,12 @@ const ArenaContent = ({
               battleStatus={battle.status}
               isArtistRole={false}
               isCurrentUserArtist={isArtist}
-              isCameraOn={isCameraOn}
               isMicOn={isMicOn}
               toggleMic={toggleMicLocal}
-              toggleCamera={toggleCameraLocal}
               onJoin={!battle.judge1 && !isArtist && !isJudge && !isSpectator ? () => handleJoinRole('judge1') : null}
               isRemoteMuted={mutedRemoteUsers[battle.judge1]}
               onToggleRemoteMute={() => toggleRemoteMute(battle.judge1)}
               mediaError={profile?.uid === battle.judge1 ? contextMediaError : null}
-              hasVideoDevice={hasVideoDevice}
             />
             <ParticipantBox 
               assignedUid={battle.judge2}
@@ -1342,15 +1408,12 @@ const ArenaContent = ({
               battleStatus={battle.status}
               isArtistRole={false}
               isCurrentUserArtist={isArtist}
-              isCameraOn={isCameraOn}
               isMicOn={isMicOn}
               toggleMic={toggleMicLocal}
-              toggleCamera={toggleCameraLocal}
               onJoin={!battle.judge2 && !isArtist && !isJudge && !isSpectator ? () => handleJoinRole('judge2') : null}
               isRemoteMuted={mutedRemoteUsers[battle.judge2]}
               onToggleRemoteMute={() => toggleRemoteMute(battle.judge2)}
               mediaError={profile?.uid === battle.judge2 ? contextMediaError : null}
-              hasVideoDevice={hasVideoDevice}
             />
           </div>
         </div>
@@ -1538,15 +1601,12 @@ const ParticipantBox = ({
   trackUrl,
   isArtistRole,
   isCurrentUserArtist,
-  isCameraOn,
   isMicOn,
   toggleMic,
-  toggleCamera,
   onJoin,
   isRemoteMuted,
   onToggleRemoteMute,
-  mediaError,
-  hasVideoDevice
+  mediaError
 }: any) => {
   const { profile: localUser } = useAuth();
   const { activeSpeaker, connectionState } = useLiveKit();
@@ -1588,6 +1648,7 @@ const ParticipantBox = ({
 
   // Final active state: either track is playing or they are speaking
   const isActive = isTrackActive || isSpeaking;
+  const isDisconnected = !initialParticipant && assignedUid && !isLocal;
 
   useEffect(() => {
     if (isActive && assignedUid) {
@@ -1595,21 +1656,26 @@ const ParticipantBox = ({
     }
   }, [isActive, assignedUid, role]);
 
-  if (!assignedUid) {
+  if (!assignedUid || isDisconnected) {
     return (
       <div className="relative rounded-2xl md:rounded-[2.5rem] border-2 border-dashed border-white/10 overflow-hidden bg-zinc-900/20 aspect-square md:aspect-[4/5] flex flex-col items-center justify-center gap-1 md:gap-4 group hover:border-red-600/30 transition-all">
         <div className="w-10 h-10 md:w-24 md:h-24 rounded-full bg-zinc-900/50 border border-white/5 flex items-center justify-center text-zinc-700 group-hover:text-red-600/50 transition-colors">
-          <Users className="w-5 h-5 md:w-12 md:h-12" />
+          {isDisconnected ? <WifiOff className="w-5 h-5 md:w-12 md:h-12" /> : <Users className="w-5 h-5 md:w-12 md:h-12" />}
         </div>
         <div className="text-center">
           <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 text-[6px] md:text-[7px] font-black uppercase tracking-widest mb-0.5 md:mb-2 inline-block">
             {role}
           </span>
           <h3 className="text-[8px] md:text-lg font-black uppercase tracking-tighter italic text-zinc-600">
-            Available
+            {isDisconnected ? 'Disconnected' : 'Available'}
           </h3>
+          {isDisconnected && p?.username && (
+            <p className="text-[8px] md:text-xs font-bold uppercase tracking-widest text-zinc-500 mt-1">
+              {p.username}
+            </p>
+          )}
         </div>
-        {onJoin && (
+        {onJoin && !isDisconnected && (
           <button 
             onClick={onJoin}
             className="px-3 md:px-6 py-1 md:py-2 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-600/20 rounded-lg md:rounded-xl text-[6px] md:text-[8px] font-black uppercase tracking-widest transition-all"
@@ -1647,23 +1713,23 @@ const ParticipantBox = ({
               <>
                 <motion.div
                   initial={{ scale: 0.8, opacity: 0 }}
-                  animate={{ scale: [1.2, 1.8, 1.2], opacity: [0.6, 0.8, 0.6] }}
+                  animate={{ scale: [1.2, 2.2, 1.2], opacity: [0.4, 0.6, 0.4] }}
                   exit={{ scale: 0.8, opacity: 0 }}
-                  transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
-                  className="absolute -inset-10 bg-red-600 blur-[50px] rounded-full z-0"
+                  transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
+                  className="absolute -inset-16 bg-red-600 blur-[60px] rounded-full z-0"
                 />
                 <motion.div
                   initial={{ scale: 0.9, opacity: 0 }}
-                  animate={{ scale: [1.1, 1.4, 1.1], opacity: [0.7, 1.0, 0.7] }}
+                  animate={{ scale: [1.1, 1.6, 1.1], opacity: [0.6, 0.9, 0.6] }}
                   exit={{ scale: 0.9, opacity: 0 }}
-                  transition={{ repeat: Infinity, duration: 1.2, ease: "easeInOut" }}
-                  className="absolute -inset-4 bg-red-500 blur-3xl rounded-full z-0"
+                  transition={{ repeat: Infinity, duration: 1, ease: "easeInOut" }}
+                  className="absolute -inset-8 bg-red-500 blur-3xl rounded-full z-0"
                 />
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  className="absolute -inset-1 rounded-full border-2 border-red-500 z-20 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.8)]"
+                  className="absolute -inset-2 rounded-full border-4 border-red-500 z-20 animate-pulse shadow-[0_0_40px_rgba(239,68,68,1)]"
                 />
               </>
             )}
@@ -1674,15 +1740,7 @@ const ParticipantBox = ({
             "relative w-16 h-16 md:w-40 md:h-40 rounded-full overflow-hidden border-2 md:border-4 transition-all duration-500 z-10 bg-zinc-950",
             isActive ? "border-red-600 scale-110 shadow-[0_0_60px_rgba(220,38,38,0.8)] ring-4 ring-red-600/30" : "border-white/10"
           )}>
-            {audioTrack && !isLocal && (
-              <AudioTrack 
-                trackRef={audioTrack} 
-                muted={isRemoteMuted}
-                onSubscriptionStatusChanged={(subscribed) => {
-                  console.log(`[ParticipantBox] ${role} audio subscription: ${subscribed}`);
-                }}
-              />
-            )}
+            {/* AudioTrack is now handled centrally in ArenaContent */}
 
             {/* Profile Photo Layer (Always shown in audio-only mode) */}
             <div className="absolute inset-0 flex items-center justify-center transition-opacity duration-500 opacity-100 z-10">

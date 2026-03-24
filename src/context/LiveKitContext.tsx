@@ -49,8 +49,22 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const connect = useCallback(async (roomName: string) => {
-    const currentProfile = profileRef.current;
-    if (!currentProfile) return;
+    // Wait for profile to be available if it's not yet
+    let currentProfile = profileRef.current;
+    if (!currentProfile) {
+      console.log("[LiveKit] Waiting for profile before connecting...");
+      // Poll for profile for up to 5 seconds
+      for (let i = 0; i < 50; i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        currentProfile = profileRef.current;
+        if (currentProfile) break;
+      }
+    }
+
+    if (!currentProfile) {
+      console.error("[LiveKit] Cannot connect: No profile available after waiting");
+      throw new Error("No profile available");
+    }
     
     // If already connecting to THIS room, wait for it
     if (connectingPromise.current && connectingPromise.current.roomName === roomName) {
@@ -67,7 +81,11 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
       if (roomRef.current || (connectingPromise.current && connectingPromise.current.roomName !== roomName)) {
         console.log(`[LiveKit] Switching from ${roomRef.current?.name || connectingPromise.current?.roomName} to ${roomName}`);
         if (roomRef.current) {
-          await roomRef.current.disconnect();
+          try {
+            await roomRef.current.disconnect();
+          } catch (e) {
+            console.warn("[LiveKit] Error during disconnect while switching:", e);
+          }
           roomRef.current = null;
           setRoom(null);
         }
@@ -76,7 +94,7 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
     try {
       setConnectionState(ConnectionState.Connecting);
       setConnectionError(null);
-      console.log(`[LiveKit] Connecting to room: ${roomName}...`);
+      console.log(`[LiveKit] Connecting to room: ${roomName} as ${currentProfile.uid}...`);
 
       const params = new URLSearchParams({
         room: roomName,
@@ -146,7 +164,11 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
             setParticipants(Array.from(newRoom.remoteParticipants.values()));
           })
           .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-            setActiveSpeaker(speakers[0] || null);
+            if (speakers.length > 0) {
+              setActiveSpeaker(speakers[0]);
+            } else {
+              setActiveSpeaker(null);
+            }
           })
           .on(RoomEvent.TrackPublished, (publication, participant) => {
             console.log(`[LiveKit] Track published: ${publication.source} by ${participant.identity}`);
@@ -190,7 +212,23 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
         setConnectionState(ConnectionState.Disconnected);
         const errorMessage = error.message || "Unknown connection error";
         setConnectionError(errorMessage);
-        console.error("[LiveKit] Connection failed:", error);
+        
+        if (errorMessage.includes("Client initiated disconnect")) {
+          console.warn("[LiveKit] Connection aborted: Client initiated disconnect");
+        } else {
+          console.error("[LiveKit] Connection failed:", error);
+        }
+        
+        if (roomRef.current) {
+          try {
+            await roomRef.current.disconnect();
+          } catch (e) {
+            console.warn("[LiveKit] Error during disconnect after failure:", e);
+          }
+          roomRef.current = null;
+          setRoom(null);
+        }
+        
         throw error;
       } finally {
         connectingPromise.current = null;

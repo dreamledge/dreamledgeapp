@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { Sword, Mic2, Users, Plus, Loader2, Video, VideoOff, MicOff, X } from 'lucide-react';
+import { Sword, Mic2, Users, Plus, Loader2, MicOff, X } from 'lucide-react';
 import { db } from '../firebase';
 import { collection, addDoc, onSnapshot, query, where, deleteDoc, doc, setDoc, limit, getDocs } from 'firebase/firestore';
 import { useAuth } from '../hooks/useAuth';
@@ -14,7 +14,7 @@ import { Track as LKTrack, ConnectionState } from 'livekit-client';
 
 export default function ArenaLobby() {
   const { profile } = useAuth();
-  const { isMicOn, isCameraOn, toggleMic, toggleCamera, startMedia, localStream } = useMediaStream();
+  const { isMicOn, toggleMic, startMedia, localStream } = useMediaStream();
   const { connect: connectLiveKit, disconnect: disconnectLiveKit, room: lkRoom, connectionState, connectionError } = useLiveKit();
   const navigate = useNavigate();
   const [isSearching, setIsSearching] = useState<string | null>(null);
@@ -362,16 +362,6 @@ export default function ArenaLobby() {
               >
                 {isMicOn ? <Mic2 className="w-4 h-4 md:w-5 md:h-5" /> : <MicOff className="w-4 h-4 md:w-5 md:h-5" />}
                 <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest">{isMicOn ? 'Mic On' : 'Mic Off'}</span>
-              </button>
-              <button 
-                onClick={toggleCamera}
-                className={cn(
-                  "flex-1 md:flex-none flex items-center justify-center gap-3 md:gap-4 px-4 md:px-6 py-3 rounded-xl md:rounded-2xl transition-all border",
-                  isCameraOn ? "bg-red-600/10 border-red-600/20 text-red-500" : "bg-zinc-900 border-white/5 text-zinc-500"
-                )}
-              >
-                {isCameraOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
-                <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest">{isCameraOn ? 'Camera On' : 'Camera Off'}</span>
               </button>
             </div>
           </div>
