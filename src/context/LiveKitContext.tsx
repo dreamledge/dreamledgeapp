@@ -129,8 +129,23 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Create and connect to room
       let livekitUrl = (import.meta as any).env.VITE_LIVEKIT_URL;
+      
       if (!livekitUrl) {
-        throw new Error("VITE_LIVEKIT_URL is not configured");
+        console.log("[LiveKit] VITE_LIVEKIT_URL missing on client, fetching from server...");
+        try {
+          const urlResponse = await fetch('/api/livekit/url');
+          if (urlResponse.ok) {
+            const urlData = await urlResponse.json();
+            livekitUrl = urlData.url;
+            console.log("[LiveKit] URL received from server:", livekitUrl);
+          }
+        } catch (e) {
+          console.warn("[LiveKit] Failed to fetch URL from server:", e);
+        }
+      }
+
+      if (!livekitUrl) {
+        throw new Error("LiveKit URL is not configured. Please check your AI Studio secrets.");
       }
 
       // Ensure URL starts with wss://
@@ -195,12 +210,6 @@ export function LiveKitProvider({ children }: { children: React.ReactNode }) {
 
         await newRoom.connect(livekitUrl, newToken, {
           autoSubscribe: true,
-          rtcConfig: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-          }
         });
         
         setParticipants(Array.from(newRoom.remoteParticipants.values()));

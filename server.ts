@@ -52,6 +52,15 @@ async function startServer() {
     }
   });
 
+  // Expose LiveKit URL (safe to expose publicly as it's just the endpoint)
+  app.get("/api/livekit/url", (req, res) => {
+    const url = process.env.VITE_LIVEKIT_URL || process.env.LIVEKIT_URL;
+    if (!url) {
+      return res.status(404).json({ error: "LiveKit URL not configured on server" });
+    }
+    res.json({ url });
+  });
+
   // Catch-all for API routes to prevent Vite from serving index.html for missing API endpoints
   app.all("/api/*", (req, res) => {
     console.warn(`[Server] Unhandled API request: ${req.method} ${req.url}`);

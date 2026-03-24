@@ -52,7 +52,8 @@ import {
   MoreVertical,
   Volume2,
   VolumeX,
-  X
+  X,
+  Settings
 } from 'lucide-react';
 import { format } from 'date-fns';
 import GifPicker from '../components/GifPicker';
@@ -885,10 +886,75 @@ export default function Arena() {
     return () => window.removeEventListener('click', resumeAudio);
   }, []);
 
+  const [isLiveKitConfigMissing, setIsLiveKitConfigMissing] = useState(false);
+
+  useEffect(() => {
+    const checkConfig = async () => {
+      const clientUrl = (import.meta as any).env.VITE_LIVEKIT_URL;
+      if (clientUrl) {
+        setIsLiveKitConfigMissing(false);
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/livekit/url');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.url) {
+            setIsLiveKitConfigMissing(false);
+            return;
+          }
+        }
+        setIsLiveKitConfigMissing(true);
+      } catch (e) {
+        setIsLiveKitConfigMissing(true);
+      }
+    };
+    checkConfig();
+  }, []);
+
+  if (isLiveKitConfigMissing) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center gap-8 p-8 text-center">
+        <div className="w-24 h-24 bg-red-600/10 rounded-full flex items-center justify-center border border-red-600/20 mb-4">
+          <Settings className="w-12 h-12 text-red-600 animate-pulse" />
+        </div>
+        <div className="space-y-4 max-w-xl">
+          <h2 className="text-3xl font-black uppercase tracking-tighter italic text-white">LiveKit Setup Required</h2>
+          <p className="text-zinc-400 text-base font-medium leading-relaxed">
+            To enable real-time voice battles, you need to configure your LiveKit credentials in AI Studio.
+          </p>
+          <div className="glass-panel p-6 rounded-3xl border border-white/5 text-left space-y-4 bg-white/5">
+            <p className="text-xs font-black uppercase tracking-widest text-red-500">How to fix this:</p>
+            <ol className="text-sm text-zinc-300 space-y-3 list-decimal list-inside font-medium">
+              <li>Go to the <span className="text-white font-bold">Settings</span> menu in AI Studio.</li>
+              <li>Open the <span className="text-white font-bold">Secrets</span> tab.</li>
+              <li>Add the following secrets:
+                <ul className="mt-2 space-y-1 ml-6 list-disc text-zinc-400">
+                  <li><code className="text-red-400">LIVEKIT_API_KEY</code></li>
+                  <li><code className="text-red-400">LIVEKIT_API_SECRET</code></li>
+                  <li><code className="text-red-400">VITE_LIVEKIT_URL</code> (e.g., <code className="text-zinc-500">wss://your-project.livekit.cloud</code>)</li>
+                </ul>
+              </li>
+              <li>Restart the application.</li>
+            </ol>
+          </div>
+        </div>
+        <button 
+          onClick={() => navigate('/arena')}
+          className="px-12 py-4 bg-white/5 hover:bg-white/10 text-zinc-400 font-black uppercase tracking-widest rounded-2xl transition-all border border-white/5"
+        >
+          Back to Lobby
+        </button>
+      </div>
+    );
+  }
+
   if (!battle) return null;
 
   return (
     <LiveKitRoom room={lkRoom || undefined}>
+      <RoomAudioRenderer />
       <ArenaContent 
         battle={battle}
         profile={profile}
@@ -927,6 +993,7 @@ export default function Arena() {
         getParticipant={getParticipant}
         isLockedSpectator={isLockedSpectator}
         connectionTimeout={connectionTimeout}
+        activeSpeaker={activeSpeaker}
       />
     </LiveKitRoom>
   );
@@ -969,7 +1036,8 @@ const ArenaContent = ({
   lkParticipants, 
   getParticipant,
   isLockedSpectator,
-  connectionTimeout
+  connectionTimeout,
+  activeSpeaker
 }: any) => {
   const navigate = useNavigate();
   const [audioEnabled, setAudioEnabled] = useState(false);
@@ -1096,15 +1164,6 @@ const ArenaContent = ({
 
   return (
     <div className="relative h-full flex flex-col gap-4 md:gap-6 px-4 md:px-6 pb-4 md:pb-6 overflow-hidden">
-      {/* Audio Tracks for all remote participants */}
-      {tracks.map(t => (
-        <AudioTrack 
-          key={t.publication.trackSid} 
-          trackRef={t} 
-          muted={mutedRemoteUsers[t.participant.identity]} 
-        />
-      ))}
-
       {/* Audio Enablement Overlay */}
       <AnimatePresence>
         {!audioEnabled && connectionState === ConnectionState.Connected && (
@@ -1129,6 +1188,12 @@ const ArenaContent = ({
                   setAudioEnabled(true);
                   if (lkRoom) {
                     try {
+                      // Resume AudioContext first
+                      const audioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+                      if (audioCtx) {
+                        const ctx = new audioCtx();
+                        await ctx.resume();
+                      }
                       await lkRoom.startAudio();
                       console.log("[Arena] Audio started successfully via startAudio()");
                     } catch (err) {
@@ -1144,6 +1209,17 @@ const ArenaContent = ({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Explicit Audio Tracks for all remote participants (Backup for RoomAudioRenderer) */}
+      <div className="hidden">
+        {tracks.map(t => (
+          <AudioTrack 
+            key={t.publication.trackSid} 
+            trackRef={t} 
+            muted={mutedRemoteUsers[t.participant.identity]} 
+          />
+        ))}
+      </div>
       <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute top-[20%] right-[-5%] w-[30%] h-[30%] bg-red-900/10 blur-[100px] rounded-full animate-pulse" />
         <div className="absolute bottom-[10%] left-[-5%] w-[30%] h-[30%] bg-zinc-900/20 blur-[100px] rounded-full" />
@@ -1342,6 +1418,7 @@ const ArenaContent = ({
               participant={getParticipant(battle.artistA)}
               participantData={remoteParticipants[battle.artistA]}
               isActive={activeTrack === battle.artistA}
+              isSpeaking={activeSpeaker?.identity === battle.artistA}
               onTogglePlayback={() => togglePlayback(battle.artistA)}
               onVote={() => handleVote(battle.artistA)}
               hasVoted={hasVoted}
@@ -1363,6 +1440,7 @@ const ArenaContent = ({
               participant={getParticipant(battle.artistB)}
               participantData={remoteParticipants[battle.artistB]}
               isActive={activeTrack === battle.artistB}
+              isSpeaking={activeSpeaker?.identity === battle.artistB}
               onTogglePlayback={() => togglePlayback(battle.artistB)}
               onVote={() => handleVote(battle.artistB)}
               hasVoted={hasVoted}
@@ -1384,7 +1462,8 @@ const ArenaContent = ({
               isLocal={profile?.uid === battle.judge1}
               participant={getParticipant(battle.judge1)}
               participantData={battle.judge1 ? remoteParticipants[battle.judge1] : null}
-              isActive={activeTrack === battle.judge1} // Use activeTrack or speaking logic (speaking is handled inside ParticipantBox)
+              isActive={activeTrack === battle.judge1} 
+              isSpeaking={activeSpeaker?.identity === battle.judge1}
               hasVoted={hasVoted}
               battleStatus={battle.status}
               isArtistRole={false}
@@ -1404,6 +1483,7 @@ const ArenaContent = ({
               participant={getParticipant(battle.judge2)}
               participantData={battle.judge2 ? remoteParticipants[battle.judge2] : null}
               isActive={activeTrack === battle.judge2}
+              isSpeaking={activeSpeaker?.identity === battle.judge2}
               hasVoted={hasVoted}
               battleStatus={battle.status}
               isArtistRole={false}
@@ -1594,6 +1674,7 @@ const ParticipantBox = ({
   participant: initialParticipant, 
   participantData,
   isActive: isTrackActive,
+  isSpeaking: propIsSpeaking,
   onTogglePlayback,
   onVote,
   hasVoted,
@@ -1613,7 +1694,7 @@ const ParticipantBox = ({
   const { isSpeaking: lkIsSpeaking } = useParticipantInfo({ participant: initialParticipant }) as any;
   
   // Use both useParticipantInfo and the room's activeSpeaker for robustness
-  const isSpeaking = lkIsSpeaking || (activeSpeaker?.identity === assignedUid);
+  const isSpeaking = propIsSpeaking || lkIsSpeaking || (activeSpeaker?.identity === assignedUid);
   
   const micOn = isLocal ? isMicOn : participantData?.isMicOn;
 
@@ -1694,7 +1775,7 @@ const ParticipantBox = ({
     )}>
       {/* Background Ambient Glow */}
       <AnimatePresence>
-        {isActive && (
+        {(isTrackActive || isSpeaking) && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1709,7 +1790,7 @@ const ParticipantBox = ({
         <div className="relative">
           {/* Active Speaker Pulse */}
           <AnimatePresence>
-            {isActive && (
+            {(isTrackActive || isSpeaking) && (
               <>
                 <motion.div
                   initial={{ scale: 0.8, opacity: 0 }}
@@ -1738,7 +1819,7 @@ const ParticipantBox = ({
           {/* The Circle */}
           <div className={cn(
             "relative w-16 h-16 md:w-40 md:h-40 rounded-full overflow-hidden border-2 md:border-4 transition-all duration-500 z-10 bg-zinc-950",
-            isActive ? "border-red-600 scale-110 shadow-[0_0_60px_rgba(220,38,38,0.8)] ring-4 ring-red-600/30" : "border-white/10"
+            (isTrackActive || isSpeaking) ? "border-red-600 scale-110 shadow-[0_0_60px_rgba(220,38,38,0.8)] ring-4 ring-red-600/30" : "border-white/10"
           )}>
             {/* AudioTrack is now handled centrally in ArenaContent */}
 
@@ -1765,7 +1846,7 @@ const ParticipantBox = ({
 
           {/* Red Glow Below the Circle */}
           <AnimatePresence>
-            {isActive && (
+            {(isTrackActive || isSpeaking) && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
